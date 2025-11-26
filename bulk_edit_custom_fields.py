@@ -54,126 +54,52 @@ AND assignee != 5f6aaf8fad3484006a8038e1
 '''.strip()
 
 
-def search_issues_v3(jira: JIRA, jql: str, fields: List[str], max_results: Optional[int] = None) -> List[Any]:
+def fetch_batch(jira: JIRA, jql: str, fields: List[str], batch_size: int = 100) -> List[Any]:
     """
-    Search for issues using the new Jira API v3 /search/jql endpoint.
+    Fetch a single batch of issues from Jira (always from startAt=0).
 
-    This function bypasses the jira library's search_issues method which uses
-    the deprecated /search endpoint, and instead uses the new /search/jql endpoint.
+    Since updated issues drop out of the query, we always fetch from the beginning.
+    This ensures stable pagination even when issues are being modified.
 
     Args:
-        jira: JIRA client instance (used for authentication and issue objects)
+        jira: JIRA client instance
         jql: JQL query string
         fields: List of field names to retrieve
-        max_results: Maximum number of results to return (None for all)
+        batch_size: Number of issues to fetch (default 100)
 
     Returns:
-        List of issue objects
+        List of issue objects for this batch
     """
     auth = (JIRA_EMAIL, JIRA_API_TOKEN)
     url = f"{JIRA_URL}/rest/api/3/search/jql"
 
-    all_issues = []
-    seen_keys = set()  # Track issue keys to avoid duplicates
-    start_at = 0
-    page_size = 100  # Jira's max per request
+    params = {
+        'jql': jql,
+        'startAt': 0,  # Always fetch from the beginning
+        'maxResults': batch_size,
+        'fields': ','.join(fields)
+    }
 
-    # First request to get total count
-    logger.info("Fetching issues from Jira...")
+    response = requests.get(url, auth=auth, params=params)
 
-    while True:
-        # Determine how many to fetch this batch
-        remaining = None
-        if max_results:
-            remaining = max_results - len(all_issues)
-            if remaining <= 0:
-                break
-            page_size = min(100, remaining)
+    if response.status_code != 200:
+        raise JIRAError(
+            f"Search failed: HTTP {response.status_code}\n"
+            f"URL: {response.url}\n"
+            f"Response: {response.text}"
+        )
 
-        params = {
-            'jql': jql,
-            'startAt': start_at,
-            'maxResults': page_size,
-            'fields': ','.join(fields)
-        }
+    data = response.json()
+    issues_data = data.get('issues', [])
+    total = data.get('total', 0)
 
-        logger.info(f"Fetching batch: startAt={start_at}, maxResults={page_size}")
-        response = requests.get(url, auth=auth, params=params)
+    # Create issue objects from response data
+    batch_issues = []
+    for issue_data in issues_data:
+        issue = Issue(jira._options, jira._session, raw=issue_data)
+        batch_issues.append(issue)
 
-        if response.status_code != 200:
-            raise JIRAError(
-                f"Search failed: HTTP {response.status_code}\n"
-                f"URL: {response.url}\n"
-                f"Response: {response.text}"
-            )
-
-        data = response.json()
-        issues_data = data.get('issues', [])
-        total = data.get('total', 0)
-
-        # Log total on first request (if available)
-        if start_at == 0:
-            if total > 0:
-                logger.info(f"Total issues matching query: {total}")
-            else:
-                logger.info(f"Note: Total count not available from API, will fetch until no more results")
-            if max_results:
-                logger.info(f"Will process maximum of {max_results} issues")
-
-        # Process issues from response data directly (avoid redundant API calls)
-        duplicates_in_batch = 0
-        for issue_data in issues_data:
-            issue_key = issue_data['key']
-
-            # Check for duplicates
-            if issue_key in seen_keys:
-                logger.warning(f"Duplicate issue detected: {issue_key} at startAt={start_at}")
-                duplicates_in_batch += 1
-                continue
-
-            # Create issue object from the response data using jira library's resource
-            # This avoids making separate API calls for each issue
-            issue = Issue(jira._options, jira._session, raw=issue_data)
-            all_issues.append(issue)
-            seen_keys.add(issue_key)
-
-        if duplicates_in_batch > 0:
-            logger.warning(f"Skipped {duplicates_in_batch} duplicate issues in this batch")
-
-        # Critical: If ALL issues in this batch were duplicates, we're stuck in a loop
-        # This happens when the JQL query excludes updated issues
-        if duplicates_in_batch == len(issues_data) and len(issues_data) > 0:
-            logger.warning("All issues in batch were duplicates - query results are changing during processing")
-            logger.warning("This usually means updated issues no longer match the JQL query")
-            logger.info("Stopping pagination to avoid infinite loop")
-            break
-
-        fetched_count = len(all_issues)
-        if total > 0:
-            logger.info(f"Fetched {len(issues_data)} issues in this batch (total: {fetched_count}/{total})")
-        else:
-            logger.info(f"Fetched {len(issues_data)} issues in this batch (total so far: {fetched_count})")
-
-        # Stop conditions
-        start_at += len(issues_data)
-
-        # Primary stop condition: no more issues returned
-        if len(issues_data) == 0:
-            logger.info("No more issues to fetch")
-            break
-
-        # Secondary stop condition: only if total is reliable (> 0) and we've reached it
-        if total > 0 and start_at >= total:
-            logger.info("Reached end of results")
-            break
-
-        # Stop if we've reached the max_results limit
-        if max_results and fetched_count >= max_results:
-            logger.info(f"Reached max_results limit of {max_results}")
-            break
-
-    logger.info(f"Finished fetching. Total issues retrieved: {len(all_issues)}")
-    return all_issues
+    return batch_issues, total
 
 
 def validate_value(value: str) -> bool:
@@ -310,7 +236,10 @@ def process_issue(jira: JIRA, issue, dry_run: bool = False) -> dict:
 
 def main(dry_run: bool = False, max_results: Optional[int] = None):
     """
-    Main function to process all matching issues.
+    Main function using fetch-process-repeat methodology.
+
+    Fetches 100 issues, processes them, then fetches next 100 (from startAt=0).
+    Works because processed issues drop out of the JQL query.
 
     Args:
         dry_run: If True, don't actually update issues
@@ -319,29 +248,16 @@ def main(dry_run: bool = False, max_results: Optional[int] = None):
     logger.info("=" * 80)
     logger.info("Starting Jira Bulk Edit Script")
     logger.info(f"Mode: {'DRY RUN' if dry_run else 'LIVE UPDATE'}")
+    logger.info(f"Methodology: Fetch-Process-Repeat (issues drop out after update)")
     logger.info("=" * 80)
 
     try:
         # Connect to Jira
         jira = connect_to_jira()
 
-        # Search for issues using the new v3 endpoint
         logger.info(f"Executing JQL query: {JQL_QUERY}")
-        issues = search_issues_v3(
-            jira,
-            JQL_QUERY,
-            fields=[SOURCE_FIELD, TARGET_FIELD, 'summary'],
-            max_results=max_results
-        )
 
-        total_issues = len(issues)
-        logger.info(f"Found {total_issues} issues to process")
-
-        if total_issues == 0:
-            logger.info("No issues found matching the JQL query")
-            return
-
-        # Process each issue
+        # Results tracking
         results = {
             'processed': 0,
             'updated': 0,
@@ -349,33 +265,75 @@ def main(dry_run: bool = False, max_results: Optional[int] = None):
             'errors': 0
         }
 
-        logger.info("")
-        logger.info("=" * 80)
-        logger.info("STARTING ISSUE PROCESSING")
-        logger.info("=" * 80)
+        batch_size = 100
+        batch_number = 0
 
-        progress_interval = 10 if total_issues < 100 else 25
+        # Keep fetching and processing until done
+        while True:
+            # Check if we've hit the limit
+            if max_results and results['processed'] >= max_results:
+                logger.info(f"Reached max_results limit of {max_results}")
+                break
 
-        for idx, issue in enumerate(issues, 1):
-            logger.info(f"\n[{idx}/{total_issues}] Processing: {issue.key} - {issue.fields.summary}")
-            result = process_issue(jira, issue, dry_run)
+            batch_number += 1
 
-            results['processed'] += 1
-            if result['success']:
-                if result['updated']:
-                    results['updated'] += 1
-                else:
-                    results['skipped'] += 1
+            # Determine how many to fetch
+            if max_results:
+                remaining = max_results - results['processed']
+                current_batch_size = min(batch_size, remaining)
             else:
-                results['errors'] += 1
+                current_batch_size = batch_size
 
-            # Show progress summary periodically
-            if idx % progress_interval == 0 or idx == total_issues:
-                logger.info("")
-                logger.info("-" * 80)
-                logger.info(f"PROGRESS UPDATE: {idx}/{total_issues} issues processed")
-                logger.info(f"  Updated: {results['updated']}, Skipped: {results['skipped']}, Errors: {results['errors']}")
-                logger.info("-" * 80)
+            # Fetch batch (always from startAt=0)
+            logger.info("")
+            logger.info("=" * 80)
+            logger.info(f"BATCH {batch_number}: Fetching up to {current_batch_size} issues from startAt=0")
+            logger.info("=" * 80)
+
+            batch, total = fetch_batch(
+                jira,
+                JQL_QUERY,
+                fields=[SOURCE_FIELD, TARGET_FIELD, 'summary'],
+                batch_size=current_batch_size
+            )
+
+            # Log status on first batch
+            if batch_number == 1:
+                if total > 0:
+                    logger.info(f"Total issues currently matching query: {total}")
+                if max_results:
+                    logger.info(f"Will process maximum of {max_results} issues")
+
+            # If no issues, we're done
+            if len(batch) == 0:
+                logger.info("No more issues match the query - all done!")
+                break
+
+            logger.info(f"Fetched {len(batch)} issues in this batch")
+
+            # Process each issue in the batch
+            for idx, issue in enumerate(batch, 1):
+                global_idx = results['processed'] + 1
+                logger.info(f"\n[Batch {batch_number}, Issue {idx}/{len(batch)}] [Total: {global_idx}] Processing: {issue.key} - {issue.fields.summary}")
+                result = process_issue(jira, issue, dry_run)
+
+                results['processed'] += 1
+                if result['success']:
+                    if result['updated']:
+                        results['updated'] += 1
+                    else:
+                        results['skipped'] += 1
+                else:
+                    results['errors'] += 1
+
+            # Show batch summary
+            logger.info("")
+            logger.info("-" * 80)
+            logger.info(f"BATCH {batch_number} COMPLETE")
+            logger.info(f"Processed {len(batch)} issues in this batch")
+            logger.info(f"Total processed so far: {results['processed']}")
+            logger.info(f"  Updated: {results['updated']}, Skipped: {results['skipped']}, Errors: {results['errors']}")
+            logger.info("-" * 80)
 
         # Summary
         logger.info("\n" + "=" * 80)
