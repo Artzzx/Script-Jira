@@ -140,6 +140,14 @@ def search_issues_v3(jira: JIRA, jql: str, fields: List[str], max_results: Optio
         if duplicates_in_batch > 0:
             logger.warning(f"Skipped {duplicates_in_batch} duplicate issues in this batch")
 
+        # Critical: If ALL issues in this batch were duplicates, we're stuck in a loop
+        # This happens when the JQL query excludes updated issues
+        if duplicates_in_batch == len(issues_data) and len(issues_data) > 0:
+            logger.warning("All issues in batch were duplicates - query results are changing during processing")
+            logger.warning("This usually means updated issues no longer match the JQL query")
+            logger.info("Stopping pagination to avoid infinite loop")
+            break
+
         fetched_count = len(all_issues)
         if total > 0:
             logger.info(f"Fetched {len(issues_data)} issues in this batch (total: {fetched_count}/{total})")
