@@ -12,7 +12,8 @@ import os
 import re
 import sys
 import logging
-from typing import List, Optional
+import requests
+from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 from jira import JIRA
 from jira.exceptions import JIRAError
@@ -50,6 +51,72 @@ AND "Numéro de soumission[Short text]" !~ "S-"
 AND "Liste Numéro de soumission[Labels]" is empty
 AND assignee != 5f6aaf8fad3484006a8038e1
 '''.strip()
+
+
+def search_issues_v3(jira: JIRA, jql: str, fields: List[str], max_results: Optional[int] = None) -> List[Any]:
+    """
+    Search for issues using the new Jira API v3 /search/jql endpoint.
+
+    This function bypasses the jira library's search_issues method which uses
+    the deprecated /search endpoint, and instead uses the new /search/jql endpoint.
+
+    Args:
+        jira: JIRA client instance (used for authentication and issue objects)
+        jql: JQL query string
+        fields: List of field names to retrieve
+        max_results: Maximum number of results to return (None for all)
+
+    Returns:
+        List of issue objects
+    """
+    auth = (JIRA_EMAIL, JIRA_API_TOKEN)
+    url = f"{JIRA_URL}/rest/api/3/search/jql"
+
+    all_issues = []
+    start_at = 0
+    page_size = 100 if max_results is None or max_results > 100 else max_results
+
+    while True:
+        params = {
+            'jql': jql,
+            'startAt': start_at,
+            'maxResults': page_size,
+            'fields': ','.join(fields)
+        }
+
+        logger.debug(f"Making request to {url} with startAt={start_at}")
+        response = requests.get(url, auth=auth, params=params)
+
+        if response.status_code != 200:
+            raise JIRAError(
+                f"Search failed: HTTP {response.status_code}\n"
+                f"URL: {response.url}\n"
+                f"Response: {response.text}"
+            )
+
+        data = response.json()
+        issues_data = data.get('issues', [])
+
+        # Convert to jira issue objects
+        for issue_data in issues_data:
+            issue = jira.issue(issue_data['key'], fields=','.join(fields))
+            all_issues.append(issue)
+
+        # Check if we have more results
+        total = data.get('total', 0)
+        start_at += len(issues_data)
+
+        logger.debug(f"Retrieved {len(issues_data)} issues, total so far: {len(all_issues)}/{total}")
+
+        # Stop if we've reached max_results or no more results
+        if max_results and len(all_issues) >= max_results:
+            all_issues = all_issues[:max_results]
+            break
+
+        if start_at >= total or len(issues_data) == 0:
+            break
+
+    return all_issues
 
 
 def validate_value(value: str) -> bool:
@@ -201,12 +268,13 @@ def main(dry_run: bool = False, max_results: Optional[int] = None):
         # Connect to Jira
         jira = connect_to_jira()
 
-        # Search for issues
+        # Search for issues using the new v3 endpoint
         logger.info(f"Executing JQL query: {JQL_QUERY}")
-        issues = jira.search_issues(
+        issues = search_issues_v3(
+            jira,
             JQL_QUERY,
-            maxResults=max_results if max_results else False,
-            fields=[SOURCE_FIELD, TARGET_FIELD, 'summary']
+            fields=[SOURCE_FIELD, TARGET_FIELD, 'summary'],
+            max_results=max_results
         )
 
         total_issues = len(issues)
