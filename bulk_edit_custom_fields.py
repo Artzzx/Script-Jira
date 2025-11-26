@@ -17,6 +17,7 @@ from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 from jira import JIRA
 from jira.exceptions import JIRAError
+from jira.resources import Issue
 
 # Configure logging
 logging.basicConfig(
@@ -73,6 +74,7 @@ def search_issues_v3(jira: JIRA, jql: str, fields: List[str], max_results: Optio
     url = f"{JIRA_URL}/rest/api/3/search/jql"
 
     all_issues = []
+    seen_keys = set()  # Track issue keys to avoid duplicates
     start_at = 0
     page_size = 100  # Jira's max per request
 
@@ -119,11 +121,24 @@ def search_issues_v3(jira: JIRA, jql: str, fields: List[str], max_results: Optio
                 logger.info(f"Will process maximum of {max_results} issues")
 
         # Process issues from response data directly (avoid redundant API calls)
+        duplicates_in_batch = 0
         for issue_data in issues_data:
-            # Create a lightweight issue object from the response data
-            # We already have all the fields we need from the search response
-            issue = jira.issue(issue_data['key'])
+            issue_key = issue_data['key']
+
+            # Check for duplicates
+            if issue_key in seen_keys:
+                logger.warning(f"Duplicate issue detected: {issue_key} at startAt={start_at}")
+                duplicates_in_batch += 1
+                continue
+
+            # Create issue object from the response data using jira library's resource
+            # This avoids making separate API calls for each issue
+            issue = Issue(jira._options, jira._session, raw=issue_data)
             all_issues.append(issue)
+            seen_keys.add(issue_key)
+
+        if duplicates_in_batch > 0:
+            logger.warning(f"Skipped {duplicates_in_batch} duplicate issues in this batch")
 
         fetched_count = len(all_issues)
         if total > 0:
