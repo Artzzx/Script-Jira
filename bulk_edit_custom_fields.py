@@ -109,8 +109,12 @@ def search_issues_v3(jira: JIRA, jql: str, fields: List[str], max_results: Optio
         issues_data = data.get('issues', [])
         total = data.get('total', 0)
 
+        # Log total on first request (if available)
         if start_at == 0:
-            logger.info(f"Total issues matching query: {total}")
+            if total > 0:
+                logger.info(f"Total issues matching query: {total}")
+            else:
+                logger.info(f"Note: Total count not available from API, will fetch until no more results")
             if max_results:
                 logger.info(f"Will process maximum of {max_results} issues")
 
@@ -122,19 +126,25 @@ def search_issues_v3(jira: JIRA, jql: str, fields: List[str], max_results: Optio
             all_issues.append(issue)
 
         fetched_count = len(all_issues)
-        logger.info(f"Fetched {len(issues_data)} issues in this batch (total: {fetched_count}/{total})")
+        if total > 0:
+            logger.info(f"Fetched {len(issues_data)} issues in this batch (total: {fetched_count}/{total})")
+        else:
+            logger.info(f"Fetched {len(issues_data)} issues in this batch (total so far: {fetched_count})")
 
         # Stop conditions
         start_at += len(issues_data)
 
+        # Primary stop condition: no more issues returned
         if len(issues_data) == 0:
             logger.info("No more issues to fetch")
             break
 
-        if start_at >= total:
+        # Secondary stop condition: only if total is reliable (> 0) and we've reached it
+        if total > 0 and start_at >= total:
             logger.info("Reached end of results")
             break
 
+        # Stop if we've reached the max_results limit
         if max_results and fetched_count >= max_results:
             logger.info(f"Reached max_results limit of {max_results}")
             break
