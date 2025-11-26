@@ -99,10 +99,39 @@ python bulk_edit_custom_fields.py
 
 You'll be prompted to confirm before any changes are made.
 
+#### Batch Processing for Large Numbers of Issues
+
+For large datasets (hundreds or thousands of issues), the script automatically handles pagination and provides progress updates. Features include:
+
+- **Automatic pagination**: Fetches issues in batches of 100 from Jira
+- **Progress tracking**: Shows progress every 10 issues (or 25 for large batches)
+- **Memory efficient**: Processes issues as they are fetched
+
+Example with progress tracking:
+```bash
+# Process all matching issues (could be hundreds)
+python bulk_edit_custom_fields.py
+
+# Or limit to a specific number for controlled batching
+python bulk_edit_custom_fields.py --max-results 500
+```
+
+The script will show detailed progress:
+```
+Fetching batch: startAt=0, maxResults=100
+Total issues matching query: 350
+Fetched 100 issues in this batch (total: 100/350)
+Fetching batch: startAt=100, maxResults=100
+...
+
+PROGRESS UPDATE: 100/350 issues processed
+  Updated: 85, Skipped: 12, Errors: 3
+```
+
 ### Command Line Options
 
 - `--dry-run`: Run without making actual updates (shows what would be changed)
-- `--max-results N`: Limit processing to N issues (useful for testing)
+- `--max-results N`: Limit processing to N issues (useful for testing or processing in controlled batches)
 
 ### Output
 
