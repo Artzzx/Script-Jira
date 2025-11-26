@@ -189,6 +189,20 @@ Skipped: 2
 Errors: 1
 ```
 
+### Important: JQL Query Behavior During Updates
+
+**Critical Note**: The JQL query includes `"Liste Numéro de soumission[Labels]" is empty`. When the script updates an issue, that issue **no longer matches the query** (because the field is no longer empty).
+
+This is intentional and means:
+- Each issue is only processed once
+- Updated issues are automatically excluded from future queries
+- The script will process all matching issues until none remain
+- Pagination is stable because updated issues drop out of the result set
+
+If you need to reprocess issues, you'll need to either:
+1. Clear the target field first, OR
+2. Modify the JQL query to include already-processed issues
+
 ### Troubleshooting
 
 **Authentication Issues**
