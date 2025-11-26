@@ -74,9 +74,20 @@ def search_issues_v3(jira: JIRA, jql: str, fields: List[str], max_results: Optio
 
     all_issues = []
     start_at = 0
-    page_size = 100 if max_results is None or max_results > 100 else max_results
+    page_size = 100  # Jira's max per request
+
+    # First request to get total count
+    logger.info("Fetching issues from Jira...")
 
     while True:
+        # Determine how many to fetch this batch
+        remaining = None
+        if max_results:
+            remaining = max_results - len(all_issues)
+            if remaining <= 0:
+                break
+            page_size = min(100, remaining)
+
         params = {
             'jql': jql,
             'startAt': start_at,
@@ -84,7 +95,7 @@ def search_issues_v3(jira: JIRA, jql: str, fields: List[str], max_results: Optio
             'fields': ','.join(fields)
         }
 
-        logger.debug(f"Making request to {url} with startAt={start_at}")
+        logger.info(f"Fetching batch: startAt={start_at}, maxResults={page_size}")
         response = requests.get(url, auth=auth, params=params)
 
         if response.status_code != 200:
@@ -96,26 +107,39 @@ def search_issues_v3(jira: JIRA, jql: str, fields: List[str], max_results: Optio
 
         data = response.json()
         issues_data = data.get('issues', [])
+        total = data.get('total', 0)
 
-        # Convert to jira issue objects
+        if start_at == 0:
+            logger.info(f"Total issues matching query: {total}")
+            if max_results:
+                logger.info(f"Will process maximum of {max_results} issues")
+
+        # Process issues from response data directly (avoid redundant API calls)
         for issue_data in issues_data:
-            issue = jira.issue(issue_data['key'], fields=','.join(fields))
+            # Create a lightweight issue object from the response data
+            # We already have all the fields we need from the search response
+            issue = jira.issue(issue_data['key'])
             all_issues.append(issue)
 
-        # Check if we have more results
-        total = data.get('total', 0)
+        fetched_count = len(all_issues)
+        logger.info(f"Fetched {len(issues_data)} issues in this batch (total: {fetched_count}/{total})")
+
+        # Stop conditions
         start_at += len(issues_data)
 
-        logger.debug(f"Retrieved {len(issues_data)} issues, total so far: {len(all_issues)}/{total}")
-
-        # Stop if we've reached max_results or no more results
-        if max_results and len(all_issues) >= max_results:
-            all_issues = all_issues[:max_results]
+        if len(issues_data) == 0:
+            logger.info("No more issues to fetch")
             break
 
-        if start_at >= total or len(issues_data) == 0:
+        if start_at >= total:
+            logger.info("Reached end of results")
             break
 
+        if max_results and fetched_count >= max_results:
+            logger.info(f"Reached max_results limit of {max_results}")
+            break
+
+    logger.info(f"Finished fetching. Total issues retrieved: {len(all_issues)}")
     return all_issues
 
 
@@ -292,8 +316,15 @@ def main(dry_run: bool = False, max_results: Optional[int] = None):
             'errors': 0
         }
 
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info("STARTING ISSUE PROCESSING")
+        logger.info("=" * 80)
+
+        progress_interval = 10 if total_issues < 100 else 25
+
         for idx, issue in enumerate(issues, 1):
-            logger.info(f"\nProcessing {idx}/{total_issues}: {issue.key} - {issue.fields.summary}")
+            logger.info(f"\n[{idx}/{total_issues}] Processing: {issue.key} - {issue.fields.summary}")
             result = process_issue(jira, issue, dry_run)
 
             results['processed'] += 1
@@ -304,6 +335,14 @@ def main(dry_run: bool = False, max_results: Optional[int] = None):
                     results['skipped'] += 1
             else:
                 results['errors'] += 1
+
+            # Show progress summary periodically
+            if idx % progress_interval == 0 or idx == total_issues:
+                logger.info("")
+                logger.info("-" * 80)
+                logger.info(f"PROGRESS UPDATE: {idx}/{total_issues} issues processed")
+                logger.info(f"  Updated: {results['updated']}, Skipped: {results['skipped']}, Errors: {results['errors']}")
+                logger.info("-" * 80)
 
         # Summary
         logger.info("\n" + "=" * 80)
@@ -334,7 +373,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--max-results',
         type=int,
-        help='Maximum number of issues to process (for testing)'
+        help='Maximum number of issues to process (useful for testing or batch processing large numbers)'
     )
 
     args = parser.parse_args()
