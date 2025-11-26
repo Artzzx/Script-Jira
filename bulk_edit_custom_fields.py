@@ -86,11 +86,16 @@ def connect_to_jira() -> JIRA:
 
     logger.info(f"Connecting to Jira at {JIRA_URL}...")
     try:
+        # Use API v3 (v2 has been deprecated and removed)
+        options = {
+            'server': JIRA_URL,
+            'rest_api_version': '3'
+        }
         jira = JIRA(
-            server=JIRA_URL,
+            options=options,
             basic_auth=(JIRA_EMAIL, JIRA_API_TOKEN)
         )
-        logger.info("Successfully connected to Jira")
+        logger.info("Successfully connected to Jira (using API v3)")
         return jira
     except JIRAError as e:
         logger.error(f"Failed to connect to Jira: {e}")
